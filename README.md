@@ -5,7 +5,7 @@
 **Course:** Optimization and Learning  
 **University:** Università di Pisa — Master's in Data Science & Business Informatics  
 **Academic Year:** 2025/26  
-**Authors:** Federica Braghin (698156), Nicholas Vannucci (691095)   
+**Authors:** Federica Braghin, Nicholas Vannucci 
 
 ---
 
