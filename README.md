@@ -5,8 +5,7 @@ Project for Optimization course
 **Course:** Optimization and Learning  
 **University:** Università di Pisa — Master's in Data Science & Business Informatics  
 **Academic Year:** 2025/26  
-**Authors:** Federica Braghin (698156), Nicholas Vannucci (691095)  
-**Supervisor:** Prof. Antonio Frangioni  
+**Authors:** Federica Braghin (698156), Nicholas Vannucci (691095)   
 
 ---
 
@@ -42,4 +41,4 @@ but becomes computationally expensive as n and k grow.
 
 ## Repository Structure
 - `teoria_progetto66.docx` — theoretical notes
-- Code and experiments (coming soon)
+- Code and experiments 
