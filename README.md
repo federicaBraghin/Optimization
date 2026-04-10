@@ -1,5 +1,5 @@
-# Optimization
-Project for Optimization course
+> Project for *Optimization for Data Science* — M.Sc. Data Science, A.Y. 2025/26
+
 # Constrained Clustering in the L2 Norm: Heuristic and Exact Methods
 
 **Course:** Optimization and Learning  
