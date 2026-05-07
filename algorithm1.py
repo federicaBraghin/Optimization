@@ -1,20 +1,47 @@
 """
-a1_algorithm.py
----------------
-A1: Modified k-means with capacity constraint.
+algorithm1.py
+-------------
+A1: Modified k-means with capacity constraint (Gruppo 66, A.Y. 2025/26).
 
-Constrained assignment solved via Minimum Cost Flow (OR-Tools).
-Centroid update: arithmetic mean of assigned points (exact minimiser
-of the L2 objective at fixed assignments, see Theorems 3.1 & 3.3).
+Constrained assignment solved via Minimum Cost Flow (OR-Tools cost-scaling
+push-relabel, Goldberg & Tarjan [10]).  Centroid update: arithmetic mean of
+assigned points — exact minimiser of the L2 objective at fixed assignments
+(Theorems 3.1 & 3.3, see Section 1.2.1 of the report).
 
 """
 
-import math
+import time
 import numpy as np
+from dataclasses import dataclass
 from ortools.graph.python import min_cost_flow
+
 
 # OR-Tools requires integer arc costs → scale float distances by this factor
 COST_SCALE = 1_000_000
+
+
+# ---------------------------------------------------------------------------
+# Result dataclass
+# ---------------------------------------------------------------------------
+
+@dataclass
+class A1Result:
+    """
+    Output of one A1 run.
+
+    Attributes
+    ----------
+    centroids  : (k, d) array  – best centroids found across all restarts
+    labels     : (n,)   array  – best point-to-cluster assignment
+    cost       : float         – best total cost (sum of squared L2 distances)
+    n_iters    : list[int]     – number of iterations per restart
+    solve_time : float         – total wall-clock time in seconds
+    """
+    centroids:  np.ndarray
+    labels:     np.ndarray
+    cost:       float
+    n_iters:    list
+    solve_time: float
 
 
 # ---------------------------------------------------------------------------
@@ -25,14 +52,22 @@ def _constrained_assignment(X, centroids, m):
     """
     Solve the constrained assignment sub-problem (eq. 11) as a MCF.
 
-    Graph structure
-    ---------------
-    Nodes  0 .. n-1   : data points       supply = +1
-    Nodes  n .. n+k-1 : centroids         supply = -m
-    Node   n+k        : artificial node   supply = km - n
+    Graph structure (Section 1.2.2 of the report)
+    -----------------------------------------------
+    Nodes  0 .. n-1   : data points      supply = +1
+    Nodes  n .. n+k-1 : centroids        supply = -m
+    Node   n+k        : artificial node  supply = km - n
 
-    Arcs (i,  n+j)  capacity 1, cost = int(||xi - cj||^2 * COST_SCALE)
-    Arcs (n+k, n+j) capacity m, cost = 0
+    Arcs (i,    n+j)  capacity 1, cost = int(||xi - cj||^2 * COST_SCALE)
+    Arcs (n+k,  n+j)  capacity m, cost = 0   (absorb unused slots)
+
+    The artificial node is necessary to balance the graph: total point supply
+    is n while total centroid demand is km >= n, so km-n fictitious
+    zero-cost assignments fill the unused slots.
+
+    Thanks to total unimodularity of the MCF constraint matrix (Proposition
+    3.1 of [1]), the LP relaxation automatically yields integer solutions
+    aij in {0,1} — no MIP solver needed.
 
     Parameters
     ----------
@@ -60,16 +95,16 @@ def _constrained_assignment(X, centroids, m):
                           i, n + j, 1, cost)
             arc_ids[(i, j)] = arc_id
 
-    # --- Arcs: artificial node  →  centroid j  (cost 0, absorb unused slots) ---
+    # --- Arcs: artificial node  →  centroid j  (cost 0) ---
     for j in range(k):
         solver.add_arc_with_capacity_and_unit_cost(art, n + j, m, 0)
 
     # --- Node supplies ---
     for i in range(n):
-        solver.set_node_supply(i, 1)          # each point sends 1 unit
+        solver.set_node_supply(i, 1)           # each point sends 1 unit
     for j in range(k):
-        solver.set_node_supply(n + j, -m)     # each centroid absorbs m units
-    solver.set_node_supply(art, k * m - n)    # artificial covers the slack
+        solver.set_node_supply(n + j, -m)      # each centroid absorbs m units
+    solver.set_node_supply(art, k * m - n)     # artificial covers the slack
 
     # --- Solve ---
     status = solver.solve()
@@ -93,27 +128,29 @@ def _constrained_assignment(X, centroids, m):
 # Step 2 – Centroid update
 # ---------------------------------------------------------------------------
 
-def _update_centroids(X, labels, k):
+def _update_centroids(X, labels, k, centroids_prev):
     """
     Update each centroid as the mean of its assigned points.
 
-    This is the exact minimiser of sum_i ||xi - cj||^2 at fixed assignments
-    (strictly convex sub-problem, unique global minimum – eq. 9/10).
-    If a cluster is empty the centroid is left unchanged (returned as zeros;
-    the caller must restore the previous centroid).
+    This is the exact minimiser of sum_i ||xi - cj||^2 at fixed assignments:
+    the sub-problem is strictly convex with a unique global minimum (eq. 9/10,
+    Theorems 3.1 & 3.3).  If a cluster is empty the centroid is left unchanged
+    (centroids_prev[j] is kept), so the update step never increases the cost.
 
     Parameters
     ----------
-    X      : (n, d) float array
-    labels : (n,)   int array
-    k      : int
+    X              : (n, d) float array
+    labels         : (n,)   int array
+    k              : int
+    centroids_prev : (k, d) float array – centroids from the previous iteration
+                     (used as fallback for empty clusters)
 
     Returns
     -------
     new_centroids : (k, d) float array
     """
-    n, d = X.shape
-    new_centroids = np.zeros((k, d), dtype=float)
+    _, d = X.shape
+    new_centroids = centroids_prev.copy()   # keeps empty-cluster centroids
 
     for j in range(k):
         mask = (labels == j)
@@ -127,31 +164,33 @@ def _update_centroids(X, labels, k):
 # Step 3 – Full A1 algorithm with r random restarts
 # ---------------------------------------------------------------------------
 
-def run_a1(X, k, m, r=10, eps=1e-6, return_iters=False):
+def run_a1(X, k, m, r=10, eps=1e-6):
     """
     Modified k-means with capacity constraint (Algorithm A1).
 
     Alternates between:
-      - constrained assignment via MCF  (optimal at fixed centroids)
-      - centroid update via mean        (optimal at fixed assignments)
-    until max centroid displacement < eps.  Repeated r times from different
-    random initialisations; the best solution (lowest total cost) is returned.
+      1. Constrained assignment via MCF   (optimal at fixed centroids, eq. 11)
+      2. Centroid update via mean         (optimal at fixed assignments, eq. 9)
+    until max centroid displacement < eps (convergence criterion, eq. 23).
+    Repeated r times from independent random initialisations; the best
+    solution (lowest total cost) is returned.
+
+    Both steps guarantee a monotone decrease of the objective, and since the
+    number of feasible assignments is finite, convergence to a local minimum
+    is guaranteed [1, 8].
 
     Parameters
     ----------
-    X            : (n, d) float array
-    k            : int   – number of clusters
-    m            : int   – capacity limit per centroid (>= ceil(n/k))
-    r            : int   – number of random restarts
-    eps          : float – convergence threshold on max centroid displacement
-    return_iters : bool  – if True, also return per-restart iteration counts
+    X   : (n, d) float array
+    k   : int   – number of clusters
+    m   : int   – capacity limit per centroid (>= ceil(n/k))
+    r   : int   – number of random restarts  (default: 10)
+    eps : float – convergence threshold on max centroid displacement (eq. 23)
 
     Returns
     -------
-    best_centroids : (k, d) float array
-    best_labels    : (n,)   int array
-    best_cost      : float
-    iters_list     : list[int]  (only if return_iters=True)
+    A1Result with best centroids, labels, cost, per-restart iter counts
+    and total wall-clock time.
     """
     X = np.asarray(X, dtype=float)
     n, d = X.shape
@@ -159,14 +198,16 @@ def run_a1(X, k, m, r=10, eps=1e-6, return_iters=False):
     best_cost      = np.inf
     best_centroids = None
     best_labels    = None
-    iters_list     = []
+    n_iters        = []
+
+    t_start = time.perf_counter()
 
     for _ in range(r):
 
         # Initialisation: k distinct random data points as centroids
         init_idx  = np.random.choice(n, k, replace=False)
         centroids = X[init_idx].copy()
-        n_iters   = 0
+        iters     = 0
 
         while True:
             centroids_old = centroids.copy()
@@ -174,13 +215,10 @@ def run_a1(X, k, m, r=10, eps=1e-6, return_iters=False):
             # Step 1 – constrained assignment (MCF)
             labels = _constrained_assignment(X, centroids, m)
 
-            # Step 2 – centroid update (mean); keep old if cluster is empty
-            new_centroids = _update_centroids(X, labels, k)
-            for j in range(k):
-                if (labels == j).any():
-                    centroids[j] = new_centroids[j]
+            # Step 2 – centroid update (mean; empty clusters keep old centroid)
+            centroids = _update_centroids(X, labels, k, centroids_old)
 
-            n_iters += 1
+            iters += 1
 
             # Convergence: max displacement across all centroids (eq. 23)
             max_shift = float(
@@ -189,33 +227,24 @@ def run_a1(X, k, m, r=10, eps=1e-6, return_iters=False):
             if max_shift < eps:
                 break
 
-        iters_list.append(n_iters)
+        n_iters.append(iters)
 
-        # Total cost: sum of squared L2 distances (eq. 22)
-        cost = float(sum(
-            np.sum((X[i] - centroids[labels[i]]) ** 2)
-            for i in range(n)
-        ))
+        # Total cost: sum of squared L2 distances (eq. 22) — vectorised
+        cost = float(
+            np.sum((X - centroids[labels]) ** 2)
+        )
 
         if cost < best_cost:
             best_cost      = cost
             best_centroids = centroids.copy()
             best_labels    = labels.copy()
 
-    if return_iters:
-        return best_centroids, best_labels, best_cost, iters_list
-    return best_centroids, best_labels, best_cost
-if __name__ == "__main__":
-    import math
-    np.random.seed(0)
-    X = np.random.randn(20, 2)
-    k = 3
-    m = math.ceil(20 / k)
-    print(f"Test: n=20, k={k}, m={m}")
-    centroids, labels, cost = run_a1(X, k, m, r=5)
-    print("Cost:", round(cost, 4))
-    print("Labels:", labels)
-    # Verifica vincolo capacità: nessun cluster deve avere più di m punti
-    for j in range(k):
-        count = (labels == j).sum()
-        print(f"  Cluster {j}: {count} punti (max consentito: {m})")
+    solve_time = time.perf_counter() - t_start
+
+    return A1Result(
+        centroids  = best_centroids,
+        labels     = best_labels,
+        cost       = best_cost,
+        n_iters    = n_iters,
+        solve_time = solve_time,
+    )
