@@ -119,6 +119,9 @@ def run_a2(X, k, m, time_limit=None, verbose=False):
         if time_limit is not None:
             model.setParam("TimeLimit", time_limit)
 
+        # Threads=1 per riproducibilità dei tempi negli esperimenti
+        model.setParam("Threads", 1)
+
         # --------------------------------------------------------------
         # Decision variables
         # --------------------------------------------------------------
@@ -127,22 +130,21 @@ def run_a2(X, k, m, time_limit=None, verbose=False):
         a = model.addVars(n, k, vtype=GRB.BINARY, name="a")
 
         # c[j,l] in [L_l, U_l]: centroid coordinates
-        c = model.addVars(
-            k, d,
-            lb={(j, l): float(L[l]) for j in range(k) for l in range(d)},
-            ub={(j, l): float(U[l]) for j in range(k) for l in range(d)},
-            name="c",
-        )
+        # I centroidi ottimali sono medie pesate dei punti assegnati,
+        # quindi appartengono necessariamente a Q (Section 1.1).
+        c = model.addVars(k, d, name="c")
+        for j in range(k):
+            for l in range(d):
+                c[j, l].lb = float(L[l])
+                c[j, l].ub = float(U[l])
 
         # z[i,j,l]: auxiliary variable representing a[i,j] * c[j,l]
-        z = model.addVars(
-            n, k, d,
-            lb={(i, j, l): float(min(0.0, L[l]))
-                for i in range(n) for j in range(k) for l in range(d)},
-            ub={(i, j, l): float(max(0.0, U[l]))
-                for i in range(n) for j in range(k) for l in range(d)},
-            name="z",
-        )
+        z = model.addVars(n, k, d, name="z")
+        for i in range(n):
+            for j in range(k):
+                for l in range(d):
+                    z[i, j, l].lb = float(min(0.0, L[l]))
+                    z[i, j, l].ub = float(max(0.0, U[l]))
 
         # --------------------------------------------------------------
         # Constraints
@@ -169,10 +171,10 @@ def run_a2(X, k, m, time_limit=None, verbose=False):
             for j in range(k):
                 for l in range(d):
                     Ll, Ul = float(L[l]), float(U[l])
-                    # V1
+                    # V1: L_l * a_ij <= z_ijl <= U_l * a_ij
                     model.addConstr(z[i, j, l] >= Ll * a[i, j])
                     model.addConstr(z[i, j, l] <= Ul * a[i, j])
-                    # V2
+                    # V2: c_jl - U_l*(1-a_ij) <= z_ijl <= c_jl - L_l*(1-a_ij)
                     model.addConstr(z[i, j, l] >= c[j, l] - Ul * (1 - a[i, j]))
                     model.addConstr(z[i, j, l] <= c[j, l] - Ll * (1 - a[i, j]))
 
@@ -225,10 +227,10 @@ def run_a2(X, k, m, time_limit=None, verbose=False):
         solve_time = float(model.Runtime)
 
     return A2Result(
-        centroids=centroids,
-        labels=labels,
-        cost=cost,
-        gap=gap,
-        solve_time=solve_time,
-        status=status_str,
+        centroids  = centroids,
+        labels     = labels,
+        cost       = cost,
+        gap        = gap,
+        solve_time = solve_time,
+        status     = status_str,
     )

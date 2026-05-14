@@ -7,6 +7,16 @@ Constrained assignment solved via Minimum Cost Flow (OR-Tools cost-scaling
 push-relabel, Goldberg & Tarjan [10]).  Centroid update: arithmetic mean of
 assigned points — exact minimiser of the L2 objective at fixed assignments
 (Theorems 3.1 & 3.3, see Section 1.2.1 of the report).
+
+Public API
+----------
+run_a1(X, k, m, r, eps, seed)         → A1Result
+    Full algorithm: r random restarts, returns best solution found.
+
+run_a1_tracked(X, k, m, eps, seed)    → A1TrackedResult
+    Single restart that records cost after every iteration.
+    Used to verify empirically the monotone decrease of the objective
+    guaranteed by the descent structure of both steps (Section 2.2.4).
 """
 
 import time
@@ -20,13 +30,13 @@ COST_SCALE = 1_000_000
 
 
 # ---------------------------------------------------------------------------
-# Result dataclass
+# Result dataclasses
 # ---------------------------------------------------------------------------
 
 @dataclass
 class A1Result:
     """
-    Output of one A1 run.
+    Output of run_a1.
 
     Attributes
     ----------
@@ -41,6 +51,27 @@ class A1Result:
     cost:       float
     n_iters:    list
     solve_time: float
+
+
+@dataclass
+class A1TrackedResult:
+    """
+    Output of run_a1_tracked: single restart with per-iteration cost history.
+
+    Attributes
+    ----------
+    centroids    : (k, d) array  – centroids at convergence
+    labels       : (n,)   array  – assignment at convergence
+    cost         : float         – final total cost
+    cost_history : list[float]   – cost after each iteration
+                                   (monotone non-increasing by construction)
+    n_iters      : int           – number of iterations until convergence
+    """
+    centroids:    np.ndarray
+    labels:       np.ndarray
+    cost:         float
+    cost_history: list
+    n_iters:      int
 
 
 # ---------------------------------------------------------------------------
@@ -156,7 +187,7 @@ def _update_centroids(X, labels, k, centroids_prev):
 
 
 # ---------------------------------------------------------------------------
-# Step 3 – Full A1 algorithm with r random restarts
+# run_a1 – Full algorithm with r random restarts
 # ---------------------------------------------------------------------------
 
 def run_a1(X, k, m, r=10, eps=1e-6, seed=None):
@@ -188,9 +219,9 @@ def run_a1(X, k, m, r=10, eps=1e-6, seed=None):
     A1Result with best centroids, labels, cost, per-restart iter counts
     and total wall-clock time.
     """
-    X   = np.asarray(X, dtype=float)
+    X    = np.asarray(X, dtype=float)
     n, d = X.shape
-    rng  = np.random.default_rng(seed)   # controllabile, None = casuale
+    rng  = np.random.default_rng(seed)
 
     best_cost      = np.inf
     best_centroids = None
@@ -245,4 +276,80 @@ def run_a1(X, k, m, r=10, eps=1e-6, seed=None):
         cost       = best_cost,
         n_iters    = n_iters,
         solve_time = solve_time,
+    )
+
+
+# ---------------------------------------------------------------------------
+# run_a1_tracked – Single restart with per-iteration cost history
+# ---------------------------------------------------------------------------
+
+def run_a1_tracked(X, k, m, eps=1e-6, seed=None):
+    """
+    Single restart of A1 that records the cost after every iteration.
+
+    Used to verify empirically the monotone non-increase of the objective
+    guaranteed by the descent structure of both steps (Section 2.2.4):
+    the MCF step is optimal at fixed centroids, and the mean update is
+    optimal at fixed assignments, so neither step can increase the cost.
+
+    Unlike run_a1 (which runs r restarts and keeps the best), this function
+    performs a single restart to expose the full per-iteration trajectory.
+    The cost recorded at each iteration uses labels recomputed on the updated
+    centroids, ensuring consistency between centroids and labels.
+
+    Parameters
+    ----------
+    X    : (n, d) float array
+    k    : int   – number of clusters
+    m    : int   – capacity limit per centroid (>= ceil(n/k))
+    eps  : float – convergence threshold on max centroid displacement (eq. 23)
+    seed : int or None – random seed for reproducibility (default: None)
+
+    Returns
+    -------
+    A1TrackedResult with cost_history, n_iters, centroids and labels
+    at convergence.
+    """
+    X    = np.asarray(X, dtype=float)
+    n, d = X.shape
+    rng  = np.random.default_rng(seed)
+
+    # Initialisation: k distinct random data points as centroids
+    init_idx  = rng.choice(n, k, replace=False)
+    centroids = X[init_idx].copy()
+
+    cost_history = []
+    iters        = 0
+
+    while True:
+        centroids_old = centroids.copy()
+
+        # Step 1 – constrained assignment (MCF)
+        labels = _constrained_assignment(X, centroids, m)
+
+        # Step 2 – centroid update
+        centroids = _update_centroids(X, labels, k, centroids_old)
+
+        iters += 1
+
+        # Costo dopo questa iterazione: ricalcola labels sui centroidi
+        # aggiornati per garantire coerenza (centroids e labels devono
+        # riferirsi allo stesso stato dell'algoritmo).
+        labels_current = _constrained_assignment(X, centroids, m)
+        cost = float(np.sum((X - centroids[labels_current]) ** 2))
+        cost_history.append(cost)
+
+        # Convergence check (eq. 23)
+        max_shift = float(
+            np.max(np.linalg.norm(centroids - centroids_old, axis=1))
+        )
+        if max_shift < eps:
+            break
+
+    return A1TrackedResult(
+        centroids    = centroids,
+        labels       = labels_current,
+        cost         = cost,
+        cost_history = cost_history,
+        n_iters      = iters,
     )
