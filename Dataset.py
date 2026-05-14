@@ -9,6 +9,7 @@ Tre configurazioni in R^2 con k=3 cluster Gaussiani:
   - hard   : fortemente sbilanciati, molto overlap  → vincolo capacità morde forte
 
 Usare generate_all() per ottenere tutti e tre i dataset.
+Usare generate_experiment() per istanze con parametri liberi.
 Usare plot_datasets() per visualizzarli.
 """
 
@@ -20,7 +21,7 @@ from dataclasses import dataclass
 
 
 # ---------------------------------------------------------------------------
-# Centri dei cluster in R^2
+# Centri dei cluster in R^2 (usati solo per easy/medium/hard)
 # Spaziati per rendere il caso easy davvero separato
 # ---------------------------------------------------------------------------
 
@@ -42,7 +43,7 @@ class DatasetConfig:
 
     Attributi
     ---------
-    name          : nome ('easy', 'medium', 'hard')
+    name          : nome ('easy', 'medium', 'hard', 'experiment')
     n_per_cluster : numero di punti per ogni cluster vero
     std           : deviazione standard delle Gaussiane
     random_state  : seed per riproducibilità
@@ -97,7 +98,7 @@ class Dataset:
     X        : array (n, d) — punti del dataset
     y        : array (n,)   — etichette vere (NON usate nel clustering)
     k        : numero di cluster
-    m        : capacità per centroide = ceil(n/k)
+    m        : capacità massima per centroide (>= ceil(n/k))
     config   : DatasetConfig usata per generare questo dataset
     """
     X: np.ndarray
@@ -121,7 +122,7 @@ class Dataset:
 
 
 # ---------------------------------------------------------------------------
-# Generazione
+# Generazione — dataset fissi (easy / medium / hard)
 # ---------------------------------------------------------------------------
 
 def generate_dataset(config: DatasetConfig, centers=CENTERS_R2) -> Dataset:
@@ -152,9 +153,74 @@ def generate_dataset(config: DatasetConfig, centers=CENTERS_R2) -> Dataset:
     return Dataset(X=X, y=y, k=k, m=m, config=config)
 
 
+# ---------------------------------------------------------------------------
+# Generazione — istanze parametriche per gli esperimenti
+# ---------------------------------------------------------------------------
+
+def generate_experiment(n: int, k: int, d: int = 2,
+                        m: int = None,
+                        std: float = 1.0,
+                        random_state: int = None) -> Dataset:
+    """
+    Genera un dataset casuale per gli esperimenti con parametri liberi.
+
+    I punti xi appartengono a un iper-rettangolo Q = prod_l [L^l, U^l]
+    determinato dai dati stessi (L^l = min_i x_i^l, U^l = max_i x_i^l),
+    coerentemente con la Sezione 1.1 del report.
+
+    Parametri
+    ---------
+    n            : numero totale di punti
+    k            : numero di cluster
+    d            : dimensionalità (default 2)
+    m            : capacità per centroide (default ceil(n/k))
+    std          : deviazione standard delle Gaussiane
+    random_state : seed (None = casuale, intero = riproducibile)
+
+    Restituisce
+    -----------
+    Dataset con X, y, k, m e config
+    """
+    rng = np.random.default_rng(random_state)
+
+    # Centri campionati casualmente in R^d.
+    # I bound L^l = min_i x_i^l e U^l = max_i x_i^l
+    # dell'iper-rettangolo Q sono determinati dai punti generati,
+    # coerentemente con la Sezione 1.1 del report.
+    centers = rng.standard_normal(size=(k, d))
+
+    # Distribuzione bilanciata: base punti per cluster, resto distribuito
+    base = n // k
+    remainder = n % k
+    n_per_cluster = [base + 1 if i < remainder else base for i in range(k)]
+
+    X, y = make_blobs(
+        n_samples=n_per_cluster,
+        centers=centers,
+        cluster_std=std,
+        random_state=random_state,
+    )
+
+    if m is None:
+        m = math.ceil(n / k)
+
+    cfg = DatasetConfig(
+        name="experiment",
+        n_per_cluster=n_per_cluster,
+        std=std,
+        random_state=random_state if random_state is not None else -1,
+    )
+
+    return Dataset(X=X, y=y, k=k, m=m, config=cfg)
+
+
+# ---------------------------------------------------------------------------
+# Generazione — tutti i dataset fissi
+# ---------------------------------------------------------------------------
+
 def generate_all(centers=CENTERS_R2) -> dict:
     """
-    Genera tutti e tre i dataset (easy, medium, hard).
+    Genera tutti e tre i dataset fissi (easy, medium, hard).
 
     Restituisce
     -----------

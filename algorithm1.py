@@ -7,7 +7,6 @@ Constrained assignment solved via Minimum Cost Flow (OR-Tools cost-scaling
 push-relabel, Goldberg & Tarjan [10]).  Centroid update: arithmetic mean of
 assigned points — exact minimiser of the L2 objective at fixed assignments
 (Theorems 3.1 & 3.3, see Section 1.2.1 of the report).
-
 """
 
 import time
@@ -86,7 +85,7 @@ def _constrained_assignment(X, centroids, m):
     solver = min_cost_flow.SimpleMinCostFlow()
 
     # --- Arcs: data point i  →  centroid j ---
-    arc_ids = {}          # (i, j) -> arc index, needed to read back the flow
+    arc_ids = {}
     for i in range(n):
         for j in range(k):
             dist_sq = float(np.sum((X[i] - centroids[j]) ** 2))
@@ -101,10 +100,10 @@ def _constrained_assignment(X, centroids, m):
 
     # --- Node supplies ---
     for i in range(n):
-        solver.set_node_supply(i, 1)           # each point sends 1 unit
+        solver.set_node_supply(i, 1)
     for j in range(k):
-        solver.set_node_supply(n + j, -m)      # each centroid absorbs m units
-    solver.set_node_supply(art, k * m - n)     # artificial covers the slack
+        solver.set_node_supply(n + j, -m)
+    solver.set_node_supply(art, k * m - n)
 
     # --- Solve ---
     status = solver.solve()
@@ -142,21 +141,17 @@ def _update_centroids(X, labels, k, centroids_prev):
     X              : (n, d) float array
     labels         : (n,)   int array
     k              : int
-    centroids_prev : (k, d) float array – centroids from the previous iteration
-                     (used as fallback for empty clusters)
+    centroids_prev : (k, d) float array
 
     Returns
     -------
     new_centroids : (k, d) float array
     """
-    _, d = X.shape
-    new_centroids = centroids_prev.copy()   # keeps empty-cluster centroids
-
+    new_centroids = centroids_prev.copy()
     for j in range(k):
         mask = (labels == j)
         if mask.any():
             new_centroids[j] = X[mask].mean(axis=0)
-
     return new_centroids
 
 
@@ -164,7 +159,7 @@ def _update_centroids(X, labels, k, centroids_prev):
 # Step 3 – Full A1 algorithm with r random restarts
 # ---------------------------------------------------------------------------
 
-def run_a1(X, k, m, r=10, eps=1e-6):
+def run_a1(X, k, m, r=10, eps=1e-6, seed=None):
     """
     Modified k-means with capacity constraint (Algorithm A1).
 
@@ -181,19 +176,21 @@ def run_a1(X, k, m, r=10, eps=1e-6):
 
     Parameters
     ----------
-    X   : (n, d) float array
-    k   : int   – number of clusters
-    m   : int   – capacity limit per centroid (>= ceil(n/k))
-    r   : int   – number of random restarts  (default: 10)
-    eps : float – convergence threshold on max centroid displacement (eq. 23)
+    X    : (n, d) float array
+    k    : int   – number of clusters
+    m    : int   – capacity limit per centroid (>= ceil(n/k))
+    r    : int   – number of random restarts  (default: 10)
+    eps  : float – convergence threshold on max centroid displacement (eq. 23)
+    seed : int or None – random seed for reproducibility (default: None)
 
     Returns
     -------
     A1Result with best centroids, labels, cost, per-restart iter counts
     and total wall-clock time.
     """
-    X = np.asarray(X, dtype=float)
+    X   = np.asarray(X, dtype=float)
     n, d = X.shape
+    rng  = np.random.default_rng(seed)   # controllabile, None = casuale
 
     best_cost      = np.inf
     best_centroids = None
@@ -205,7 +202,7 @@ def run_a1(X, k, m, r=10, eps=1e-6):
     for _ in range(r):
 
         # Initialisation: k distinct random data points as centroids
-        init_idx  = np.random.choice(n, k, replace=False)
+        init_idx  = rng.choice(n, k, replace=False)
         centroids = X[init_idx].copy()
         iters     = 0
 
@@ -229,10 +226,11 @@ def run_a1(X, k, m, r=10, eps=1e-6):
 
         n_iters.append(iters)
 
-        # Total cost: sum of squared L2 distances (eq. 22) — vectorised
-        cost = float(
-            np.sum((X - centroids[labels]) ** 2)
-        )
+        # Ricalcola le labels finali sui centroidi convergenti (eq. 22):
+        # all'uscita del loop centroids è aggiornato ma labels no,
+        # quindi serve un ultimo passo MCF per garantire coerenza.
+        labels = _constrained_assignment(X, centroids, m)
+        cost   = float(np.sum((X - centroids[labels]) ** 2))
 
         if cost < best_cost:
             best_cost      = cost
